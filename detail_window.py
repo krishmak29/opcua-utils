@@ -61,6 +61,10 @@ def read_all(app, o, tr, mapping):
             setv(tr, iid, "Not Connected")
         return
 
+    for iid, r in mapping.items():
+        if get_address(r):
+            setv(tr, iid, "Reading...")
+
     def work():
         for iid, r in mapping.items():
             a = get_address(r)
@@ -143,10 +147,20 @@ def open_detail_window(app, o):
     tr = ttk.Treeview(tr_frame, columns=cols, show="headings")
     for c, ttext, wd in [("tag", "Tag Name", 230), ("value", "PLC / OPC Value", 130), ("address", "Address", 110),
                           ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
-                          ("verify", "Verify Sts", 80), ("verifyTS", "Verify TS", 80)]:
+                          ("verify", "Verify Sts (dbl-click)", 130), ("verifyTS", "Verify TS", 80)]:
         tr.heading(c, text=ttext)
         tr.column(c, width=wd)
     tr.pack(side="left", fill="both", expand=True)
+
+    def _on_tr_motion(event):
+        region = tr.identify("region", event.x, event.y)
+        col = tr.identify_column(event.x)
+        if region == "cell" and col == "#7":
+            tr.configure(cursor="hand2")
+        else:
+            tr.configure(cursor="")
+
+    tr.bind("<Motion>", _on_tr_motion)
     tr_scroll = ttk.Scrollbar(tr_frame, orient="vertical", command=tr.yview)
     tr_scroll.pack(side="right", fill="y")
     tr.configure(yscrollcommand=tr_scroll.set)
@@ -215,7 +229,7 @@ def open_detail_window(app, o):
             dirty_flag["value"] = False
         w.destroy()
 
-    ttk.Button(w, text="SAVE VERIFICATION", command=save, padding=(14, 6), style="Accent.TButton").pack(side="right", padx=10, pady=8)
+    ttk.Button(w, text="Save Verification", command=save, padding=(14, 6), style="Accent.TButton").pack(side="right", padx=10, pady=8)
 
     w.protocol("WM_DELETE_WINDOW", lambda: _try_close(app, w, mapping, dirty_flag, o))
 

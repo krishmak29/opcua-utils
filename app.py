@@ -35,29 +35,56 @@ class App(tk.Tk):
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="PLC / SCADA Object Verification Utility", font=("Segoe UI", 12, "bold")).pack(side="left")
-        self.theme_btn = ttk.Button(top, text="🌙 Dark Mode", command=self.toggle_theme, padding=(10, 5))
+        self.theme_btn = ttk.Button(top, text="Dark Mode", command=self.toggle_theme, padding=(10, 5))
         self.theme_btn.pack(side="right", padx=(0, 8))
-        ttk.Button(top, text="⚙ Settings", command=self.open_settings, padding=(10, 5)).pack(side="right")
+        ttk.Button(top, text="Settings", command=self.open_settings, padding=(10, 5)).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="Disconnect", command=self.disconnect, padding=(10, 5)).pack(side="right", padx=(0, 8))
+        ttk.Button(top, text="Connect All", command=self.connect, padding=(10, 5), style="Accent.TButton").pack(side="right", padx=(0, 8))
         self.status = tk.StringVar(value="Ready")
         ttk.Label(self, textvariable=self.status, padding=(8, 0)).pack(fill="x")
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, padx=8, pady=8)
 
-        side = ttk.Frame(body, width=220)
+        side = ttk.Frame(body, width=230)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
+        PLACEHOLDER = "Search PLC..."
         self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *a: self.populate_sidebar())
-        ttk.Entry(side, textvariable=self.search_var).pack(fill="x", pady=(0, 5))
-        ttk.Label(side, text="Search PLC...", foreground="gray").place(in_=side, x=6, y=4) if False else None
+        self.search_entry = ttk.Entry(side, textvariable=self.search_var)
+        self.search_entry.pack(fill="x", pady=(0, 5))
+        self._search_placeholder_active = False
+
+        def _clear_placeholder(e=None):
+            if self._search_placeholder_active:
+                self.search_entry.delete(0, "end")
+                self.search_entry.config(foreground=self.colors()["fg"])
+                self._search_placeholder_active = False
+
+        def _set_placeholder(e=None):
+            if not self.search_var.get():
+                self._search_placeholder_active = True
+                self.search_entry.insert(0, PLACEHOLDER)
+                self.search_entry.config(foreground=self.colors()["muted"])
+
+        self.search_entry.bind("<FocusIn>", _clear_placeholder)
+        self.search_entry.bind("<FocusOut>", _set_placeholder)
+        _set_placeholder()
+
+        def _on_search_write(*a):
+            if not self._search_placeholder_active:
+                self.populate_sidebar()
+
+        self.search_var.trace_add("write", _on_search_write)
         plc_frame = ttk.Frame(side)
         plc_frame.pack(fill="both", expand=True)
-        self.plc_list = ttk.Treeview(plc_frame, columns=("count",), show="tree headings", height=25)
+        self.plc_list = ttk.Treeview(plc_frame, columns=("count", "status"), show="tree headings", height=25)
         self.plc_list.heading("#0", text="PLC")
         self.plc_list.heading("count", text="Tested")
-        self.plc_list.column("#0", width=140)
-        self.plc_list.column("count", width=70, anchor="e")
+        self.plc_list.heading("status", text="Link")
+        self.plc_list.column("#0", width=118, stretch=True)
+        self.plc_list.column("count", width=52, anchor="center", stretch=False)
+        self.plc_list.column("status", width=36, anchor="center", stretch=False)
         self.plc_list.pack(side="left", fill="both", expand=True)
         plc_scroll = ttk.Scrollbar(plc_frame, orient="vertical", command=self.plc_list.yview)
         plc_scroll.pack(side="right", fill="y")
@@ -113,7 +140,7 @@ class App(tk.Tk):
     def apply_theme(self):
         t = self.colors()
         self.configure(bg=t["bg"])
-        self.theme_btn.config(text="☀ Light Mode" if self.theme == "dark" else "🌙 Dark Mode")
+        self.theme_btn.config(text="Light Mode" if self.theme == "dark" else "Dark Mode")
         style = ttk.Style(self)
         style.theme_use("clam")
         style.configure(".", background=t["bg"], foreground=t["fg"], fieldbackground=t["entry_bg"])
@@ -131,6 +158,8 @@ class App(tk.Tk):
         style.map("Treeview", background=[("selected", t["tree_sel"])], foreground=[("selected", t["fg"])])
         style.configure("Treeview.Heading", background=t["panel"], foreground=t["fg"], bordercolor=t["border"])
         style.map("Treeview.Heading", background=[("active", t["tree_sel"])])
+        self.plc_list.tag_configure("connected", foreground=t["success"])
+        self.plc_list.tag_configure("disconnected", foreground=t["muted"])
 
     def reload(self):
         self.cfg = load_config(self.cf.get())
@@ -165,22 +194,20 @@ class App(tk.Tk):
         ttk.Label(f, text="Config File:").grid(row=1, column=0, sticky="w")
         ttk.Entry(f, textvariable=self.cf, width=45).grid(row=1, column=1, padx=5, pady=4)
         ttk.Button(f, text="Reload Config", command=self.reload).grid(row=1, column=2)
-        ttk.Separator(f).grid(row=2, column=0, columnspan=3, sticky="ew", pady=12)
-        ttk.Label(f, text="Connection", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, sticky="w")
-        ttk.Button(f, text="Connect All", command=self.connect).grid(row=4, column=0, pady=6, sticky="w")
-        ttk.Button(f, text="Disconnect", command=self.disconnect).grid(row=4, column=1, pady=6, sticky="w")
-        ttk.Button(f, text="Close", command=w.destroy).grid(row=5, column=2, pady=(20, 0), sticky="e")
+        ttk.Button(f, text="Close", command=w.destroy).grid(row=3, column=2, pady=(20, 0), sticky="e")
 
     def populate_sidebar(self):
         for i in self.plc_list.get_children():
             self.plc_list.delete(i)
-        q = self.search_var.get().strip().lower()
+        q = "" if getattr(self, "_search_placeholder_active", False) else self.search_var.get().strip().lower()
         for plc in sorted(self.byplc):
             if q and q not in plc.lower():
                 continue
             total = len(self.byplc[plc])
             tested = sum(bool(self.comments.get(key(o))) for o in self.byplc[plc])
-            self.plc_list.insert("", "end", iid=plc, text=plc, values=(f"{tested}/{total}",))
+            connected = plc in self.conns
+            tag = "connected" if connected else "disconnected"
+            self.plc_list.insert("", "end", iid=plc, text=plc, values=(f"{tested}/{total}", "●"), tags=(tag,))
         kids = self.plc_list.get_children()
         if kids and not self.current_plc:
             self.plc_list.selection_set(kids[0])
@@ -234,6 +261,7 @@ class App(tk.Tk):
                     c = Conn(cfg)
                     self.a.call(c.connect())
                     self.conns[plc] = c
+                    self.after(0, self.populate_sidebar)
                 except Exception as e:
                     self.status.set(f"{plc}: {e}")
             self.status.set(f"Connected {len(self.conns)} PLC(s)")
@@ -247,6 +275,7 @@ class App(tk.Tk):
                 pass
         self.conns = {}
         self.status.set("Disconnected")
+        self.populate_sidebar()
 
     def update_progress(self):
         n = len(self.objects)
