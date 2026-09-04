@@ -57,6 +57,10 @@ def load_config(path):
     return {"plc": pc, "display": d, "causes": c or load_config.__defaults__}
 
 
+def key(o):
+    return "|".join([o["PLC"], o["Area"], o["Equipment"]])
+
+
 def group(data):
     out = {}
     for r in data:

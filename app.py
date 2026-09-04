@@ -6,8 +6,8 @@ from tkinter import ttk, messagebox
 
 from config import ENGINEERING, CONFIG
 from theme import THEMES
-from data_io import load_engineering, load_config, group
-from db import DB, key
+from data_io import load_engineering, load_config, group, key
+from excel_writer import load_general_comments
 from opcua_client import Async, Conn
 from detail_window import open_detail_window
 
@@ -18,7 +18,7 @@ class App(tk.Tk):
         self.title("PLC / SCADA Object Verification Utility")
         self.geometry("1250x780")
         self.cfg = load_config(CONFIG)
-        self.db = DB()
+        self.comments = {}
         self.a = Async()
         self.objects = []
         self.byplc = {}
@@ -139,6 +139,7 @@ class App(tk.Tk):
     def load(self):
         try:
             self.objects = group(load_engineering(self.eng.get()))
+            self.comments = load_general_comments(self.eng.get())
             self.byplc = {}
             for o in self.objects:
                 self.byplc.setdefault(o["PLC"], []).append(o)
@@ -178,7 +179,7 @@ class App(tk.Tk):
             if q and q not in plc.lower():
                 continue
             total = len(self.byplc[plc])
-            tested = sum(bool(self.db.get(key(o))) for o in self.byplc[plc])
+            tested = sum(bool(self.comments.get(key(o))) for o in self.byplc[plc])
             self.plc_list.insert("", "end", iid=plc, text=plc, values=(f"{tested}/{total}",))
         kids = self.plc_list.get_children()
         if kids and not self.current_plc:
@@ -195,9 +196,9 @@ class App(tk.Tk):
         x = self.byplc.get(self.current_plc, [])
         fl = self.filter.get()
         if fl == "Not Tested":
-            return [o for o in x if not self.db.get(key(o))]
+            return [o for o in x if not self.comments.get(key(o))]
         if fl in ("Correct", "Incorrect", "Recheck"):
-            return [o for o in x if (self.db.get(key(o)) or [None])[0] == fl]
+            return [o for o in x if (self.comments.get(key(o)) or {}).get("status") == fl]
         return x
 
     def render_objects(self):
@@ -208,14 +209,14 @@ class App(tk.Tk):
         x = self.filtered_objects()
         self._objmap = {}
         for i, o in enumerate(x):
-            r = self.db.get(key(o))
-            result = r[0] if r else "Not Tested"
+            r = self.comments.get(key(o))
+            result = r["status"] if r else "Not Tested"
             iid = f"row{i}"
             self._objmap[iid] = o
             self.obj_list.insert("", "end", iid=iid, text=o["Equipment"], values=(o["Template"], o["Area"], result))
         self.pvar.set(f"{len(x)} object(s)")
         total = len(self.byplc[self.current_plc])
-        tested = sum(bool(self.db.get(key(o))) for o in self.byplc[self.current_plc])
+        tested = sum(bool(self.comments.get(key(o))) for o in self.byplc[self.current_plc])
         self.info.config(text=f"{self.current_plc} | Total: {total} | Tested: {tested} | Remaining: {total-tested}")
 
     def open_selected(self):
@@ -249,12 +250,11 @@ class App(tk.Tk):
 
     def update_progress(self):
         n = len(self.objects)
-        rec = [self.db.get(key(o)) for o in self.objects]
+        rec = [self.comments.get(key(o)) for o in self.objects]
         t = sum(bool(x) for x in rec)
         self.progress.set(f"Overall: {n} Objects | {t} Tested | {n-t} Remaining")
 
     def close(self):
         self.disconnect()
-        self.db.c.close()
         self.a.stop()
         self.destroy()

@@ -5,9 +5,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
-from data_io import s, get_address
-from db import key
-from excel_writer import save_tag_verifications
+from data_io import s, get_address, key
+from excel_writer import save_tag_verifications, save_general_comment
 
 
 def edit_verification_status(app, event, tr, mapping, dirty_flag):
@@ -166,7 +165,7 @@ def open_detail_window(app, o):
 
     ctl = ttk.Frame(w, padding=10)
     ctl.pack(fill="x")
-    result = tk.StringVar(value=(app.db.get(key(o)) or ["Correct"])[0])
+    result = tk.StringVar(value=(app.comments.get(key(o)) or {}).get("status") or "Correct")
     ttk.Label(ctl, text="Verification:").grid(row=0, column=0, sticky="w")
     for j, x in enumerate(("Correct", "Incorrect", "Recheck"), 1):
         ttk.Radiobutton(ctl, text=x, variable=result, value=x).grid(row=0, column=j, sticky="w")
@@ -184,17 +183,29 @@ def open_detail_window(app, o):
     comment = tk.Text(ctl, width=80, height=4, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
     comment.grid(row=3, column=1, columnspan=3)
 
-    old = app.db.get(key(o))
+    old = app.comments.get(key(o))
     if old:
-        if old[1]:
-            cause.set(old[1])
-        tester.insert(0, old[3] or "")
-        comment.insert("1.0", old[2] or "")
+        if old.get("cause"):
+            cause.set(old["cause"])
+        tester.insert(0, old.get("tester") or "")
+        comment.insert("1.0", old.get("comment") or "")
 
     ttk.Button(w, text="Read All Parameters", command=lambda: read_all(app, o, tr, mapping), padding=(10, 6)).pack(side="left", padx=10, pady=8)
 
     def save():
-        app.db.save(o, result.get(), cause.get(), comment.get("1.0", "end").strip(), tester.get().strip())
+        status_v = result.get()
+        cause_v = cause.get()
+        tester_v = tester.get().strip()
+        comment_v = comment.get("1.0", "end").strip()
+        try:
+            save_general_comment(app.eng.get(), o["PLC"], o["Template"], o["Area"], o["Equipment"],
+                                  status_v, cause_v, tester_v, comment_v)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        app.comments[key(o)] = {"status": status_v, "cause": cause_v, "tester": tester_v, "comment": comment_v}
+        app.populate_sidebar()
+        app.render_objects()
         if dirty_flag["value"]:
             try:
                 _save_tag_verifications(app, o, mapping)

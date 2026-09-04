@@ -1,9 +1,15 @@
 """Writes per-tag verification status/timestamp back into the engineering Excel sheet."""
 
+from pathlib import Path
+
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string
 
 from data_io import s
+
+GENERAL_COMMENTS_SHEET = "General Comments"
+GENERAL_COMMENTS_HEADERS = ["Sr No", "PLC", "Template", "Area Code*", "Equipment Number*",
+                             "Verification Status", "Cause", "Tester", "Comment"]
 
 
 def _find_header_col(headers, *names):
@@ -69,3 +75,63 @@ def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_
 
     wb.save(path)
     return written, list(pending.keys())
+
+def load_general_comments(path):
+    """Return dict keyed by 'PLC|Area|Equipment' -> dict with status/cause/tester/comment/sr."""
+    if not Path(path).exists():
+        return {}
+    wb = load_workbook(path, data_only=True)
+    if GENERAL_COMMENTS_SHEET not in wb.sheetnames:
+        return {}
+    ws = wb[GENERAL_COMMENTS_SHEET]
+    out = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or all(v is None for v in row):
+            continue
+        vals = (list(row) + [None] * 9)[:9]
+        sr, plc, template, area, equipment, status, cause, tester, comment = vals
+        if not plc or not equipment:
+            continue
+        k = "|".join([s(plc), s(area), s(equipment)])
+        out[k] = {"sr": sr, "status": s(status), "cause": s(cause), "tester": s(tester), "comment": s(comment)}
+    return out
+
+
+def save_general_comment(path, plc, template, area, equipment, status, cause, tester, comment):
+    """Write/overwrite one equipment-level row in the General Comments sheet.
+    Matches by PLC + Area + Equipment. Overwrite keeps the existing Sr No;
+    a new row gets max(Sr No) + 1. Creates the sheet with headers if missing."""
+    wb = load_workbook(path)
+    if GENERAL_COMMENTS_SHEET not in wb.sheetnames:
+        ws = wb.create_sheet(GENERAL_COMMENTS_SHEET)
+        ws.append(GENERAL_COMMENTS_HEADERS)
+    else:
+        ws = wb[GENERAL_COMMENTS_SHEET]
+
+    target_key = (s(plc), s(area), s(equipment))
+    max_sr = 0
+    match_row = None
+    for r in range(2, ws.max_row + 1):
+        row_plc = s(ws.cell(row=r, column=2).value)
+        row_area = s(ws.cell(row=r, column=4).value)
+        row_eq = s(ws.cell(row=r, column=5).value)
+        sr_val = ws.cell(row=r, column=1).value
+        if isinstance(sr_val, (int, float)):
+            max_sr = max(max_sr, int(sr_val))
+        if (row_plc, row_area, row_eq) == target_key:
+            match_row = r
+
+    if match_row is None:
+        match_row = ws.max_row + 1
+        ws.cell(row=match_row, column=1).value = max_sr + 1
+
+    ws.cell(row=match_row, column=2).value = plc
+    ws.cell(row=match_row, column=3).value = template
+    ws.cell(row=match_row, column=4).value = area
+    ws.cell(row=match_row, column=5).value = equipment
+    ws.cell(row=match_row, column=6).value = status
+    ws.cell(row=match_row, column=7).value = cause
+    ws.cell(row=match_row, column=8).value = tester
+    ws.cell(row=match_row, column=9).value = comment
+
+    wb.save(path)    
