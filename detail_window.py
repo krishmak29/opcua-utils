@@ -177,25 +177,57 @@ def open_detail_window(app, o):
             s(r.get("Verification Status") or "Not Tested"), s(r.get("Verification Time"))))
     tr.bind("<Double-1>", lambda event: edit_verification_status(app, event, tr, mapping, dirty_flag))
 
-    ctl = ttk.Frame(w, padding=10)
-    ctl.pack(fill="x")
+    card = ttk.LabelFrame(w, text="Verification", padding=12)
+    card.pack(fill="x", padx=10, pady=(8, 0))
+
     result = tk.StringVar(value=(app.comments.get(key(o)) or {}).get("status") or "Correct")
-    ttk.Label(ctl, text="Verification:").grid(row=0, column=0, sticky="w")
-    for j, x in enumerate(("Correct", "Incorrect", "Recheck"), 1):
-        ttk.Radiobutton(ctl, text=x, variable=result, value=x).grid(row=0, column=j, sticky="w")
+    pill_colors = {"Correct": t["success"], "Incorrect": t["danger"], "Recheck": t["warning"]}
+    pill_buttons = {}
 
-    ttk.Label(ctl, text="Cause:").grid(row=1, column=0, sticky="w", pady=5)
+    def refresh_pills():
+        for val, btn in pill_buttons.items():
+            if result.get() == val:
+                btn.config(bg=pill_colors[val], fg="#FFFFFF")
+            else:
+                btn.config(bg=t["entry_bg"], fg=t["fg"])
+
+    def pick_result(val):
+        result.set(val)
+        refresh_pills()
+
+    top_row = ttk.Frame(card)
+    top_row.pack(fill="x")
+
+    result_frame = ttk.Frame(top_row)
+    result_frame.pack(side="left")
+    for val in ("Correct", "Incorrect", "Recheck"):
+        b = tk.Button(result_frame, text=val, width=11, relief="flat", cursor="hand2", bd=0,
+                      activeforeground="#FFFFFF", command=lambda v=val: pick_result(v))
+        b.pack(side="left", padx=(0, 6), ipady=4)
+        pill_buttons[val] = b
+    refresh_pills()
+
+    tester_frame = ttk.Frame(top_row)
+    tester_frame.pack(side="left", padx=(24, 0))
+    ttk.Label(tester_frame, text="Tester:").pack(anchor="w")
+    tester = tk.Entry(tester_frame, width=22, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
+    tester.pack(anchor="w")
+    tester_warning = ttk.Label(tester_frame, text="", foreground=t["danger"])
+    tester_warning.pack(anchor="w")
+
+    def check_tester(*a):
+        tester_warning.config(text="" if tester.get().strip() else "⚠ Tester required before saving")
+
+    tester.bind("<KeyRelease>", check_tester)
+
+    ttk.Label(card, text="Cause:").pack(anchor="w", pady=(12, 2))
     cause = tk.StringVar()
-    cb = ttk.Combobox(ctl, textvariable=cause, values=[f"{a} - {b}" for a, b in app.cfg["causes"]], width=55)
-    cb.grid(row=1, column=1, columnspan=3, sticky="w")
+    cb = ttk.Combobox(card, textvariable=cause, values=[f"{a} - {b}" for a, b in app.cfg["causes"]], width=45)
+    cb.pack(anchor="w")
 
-    ttk.Label(ctl, text="Tester:").grid(row=2, column=0, sticky="w")
-    tester = tk.Entry(ctl, width=30, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
-    tester.grid(row=2, column=1, sticky="w")
-
-    ttk.Label(ctl, text="Comment:").grid(row=3, column=0, sticky="nw")
-    comment = tk.Text(ctl, width=80, height=4, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
-    comment.grid(row=3, column=1, columnspan=3)
+    ttk.Label(card, text="Comment:").pack(anchor="w", pady=(12, 2))
+    comment = tk.Text(card, height=5, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
+    comment.pack(fill="x")
 
     old = app.comments.get(key(o))
     if old:
@@ -203,8 +235,7 @@ def open_detail_window(app, o):
             cause.set(old["cause"])
         tester.insert(0, old.get("tester") or "")
         comment.insert("1.0", old.get("comment") or "")
-
-    ttk.Button(w, text="Read All Parameters", command=lambda: read_all(app, o, tr, mapping), padding=(10, 6)).pack(side="left", padx=10, pady=8)
+    check_tester()
 
     def save():
         status_v = result.get()
@@ -229,7 +260,11 @@ def open_detail_window(app, o):
             dirty_flag["value"] = False
         w.destroy()
 
-    ttk.Button(w, text="Save Verification", command=save, padding=(14, 6), style="Accent.TButton").pack(side="right", padx=10, pady=8)
+    ttk.Separator(w).pack(fill="x", padx=10, pady=(10, 0))
+    btn_row = ttk.Frame(w)
+    btn_row.pack(fill="x")
+    ttk.Button(btn_row, text="Read All Parameters", command=lambda: read_all(app, o, tr, mapping), padding=(10, 6)).pack(side="left", padx=10, pady=8)
+    ttk.Button(btn_row, text="Save Verification", command=save, padding=(14, 6), style="Accent.TButton").pack(side="right", padx=10, pady=8)
 
     w.protocol("WM_DELETE_WINDOW", lambda: _try_close(app, w, mapping, dirty_flag, o))
 
