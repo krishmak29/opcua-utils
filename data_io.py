@@ -40,13 +40,15 @@ def load_engineering(path):
 
 def load_config(path):
     if not Path(path).exists():
-        return {"plc": {}, "display": {"ObjectsPerPage": 12, "RefreshRateMs": 1000, "MainValueSuffix": "RD.PV"},
+        return {"plc": {}, "display": {"ObjectsPerPage": 12, "RefreshRateMs": 1000, "MainValueSuffix": "RD.PV",
+                                        "VerifyStatusColumn": "", "VerifyTimestampColumn": ""},
                 "causes": [("C001", "Wrong PLC value"), ("C002", "Wrong SCADA value"), ("C003", "Communication failure"),
                            ("C004", "Wrong scaling"), ("C005", "Wrong engineering unit"), ("C006", "Wrong alarm status"),
                            ("C007", "Wrong tag mapping"), ("C008", "Object not available"), ("C009", "PLC not available"), ("C010", "Other")]}
     wb = load_workbook(path, data_only=True)
     pc = {s(r.get("PLC")): r for r in rows(wb, "PLC_Config") if s(r.get("PLC"))}
-    d = {"ObjectsPerPage": 12, "RefreshRateMs": 1000, "MainValueSuffix": "RD.PV"}
+    d = {"ObjectsPerPage": 12, "RefreshRateMs": 1000, "MainValueSuffix": "RD.PV",
+         "VerifyStatusColumn": "", "VerifyTimestampColumn": ""}
     for r in rows(wb, "Display_Config"):
         if s(r.get("Parameter")):
             d[s(r["Parameter"])] = r.get("Value")
