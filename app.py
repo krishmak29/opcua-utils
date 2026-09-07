@@ -174,6 +174,7 @@ class App(tk.Tk):
                 status_col_letter=d.get("VerifyStatusColumn"),
                 ts_col_letter=d.get("VerifyTimestampColumn"),
                 cv_col_letter=d.get("CurrentValueColumn"),
+                tester_col_letter=d.get("TesterColumn"),
             ))
             self.comments = load_general_comments(self.eng.get())
             self.byplc = {}

@@ -9,7 +9,7 @@ from data_io import s, get_address, key, ENGINEERING_HEADER_ROW, ENGINEERING_SHE
 from excel_writer import save_tag_verifications, save_general_comment
 
 
-def edit_verification_status(app, event, tr, mapping, dirty_flag):
+def edit_verification_status(app, event, tr, mapping, dirty_flag, dirty_rows):
     region = tr.identify("region", event.x, event.y)
     if region != "cell":
         return
@@ -35,12 +35,16 @@ def edit_verification_status(app, event, tr, mapping, dirty_flag):
     def save_status(event=None):
         new_value = combo.get()
         verification_time = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        live_value = tr.set(row_id, "#2")
+        tr.set(row_id, "#3", live_value)
         tr.set(row_id, "#8", new_value)
         tr.set(row_id, "#9", verification_time)
         if row_id in mapping:
             mapping[row_id]["Verification Status"] = new_value
             mapping[row_id]["Verification Time"] = verification_time
+            mapping[row_id]["Current Value"] = live_value
         dirty_flag["value"] = True
+        dirty_rows.add(row_id)
         combo.destroy()
 
     combo.bind("<<ComboboxSelected>>", save_status)
@@ -56,14 +60,14 @@ def setv(tr, iid, v):
 
 def getv(tr, iid):
     x = tr.item(iid, "values")
-    return x[1] if x else ""
+    return x[2] if x else ""
 
 
 def read_all(app, o, tr, mapping):
     conn = app.conns.get(o["PLC"])
     if not conn:
         for iid in mapping:
-            setv(tr, iid, "Not Connected")
+            setv(tr, iid, "-")
         return
 
     for iid, r in mapping.items():
@@ -84,12 +88,14 @@ def read_all(app, o, tr, mapping):
     threading.Thread(target=work, daemon=True).start()
 
 
-def _build_tag_updates(o, mapping, tr=None):
+def _build_tag_updates(o, mapping, tr=None, dirty_rows=None, tester=""):
     updates = []
     for iid, r in mapping.items():
+        if dirty_rows is not None and iid not in dirty_rows:
+            continue
         cv = getv(tr, iid) if tr is not None else ""
         if cv in ("Not Connected", "Reading...", "—"):
-            cv = ""
+            cv = "-"
         updates.append({
             "_row": r.get("_row"),
             "PLC": o["PLC"],
@@ -98,17 +104,22 @@ def _build_tag_updates(o, mapping, tr=None):
             "Verification Status": r.get("Verification Status") or "Not Tested",
             "Verification Time": r.get("Verification Time") or "",
             "Current Value": cv,
+            "Tester Name": tester,
         })
     return updates
 
 
-def _save_tag_verifications(app, o, mapping, tr=None):
+def _save_tag_verifications(app, o, mapping, tr=None, dirty_rows=None, tester=""):
     status_col = app.cfg["display"].get("VerifyStatusColumn")
     ts_col = app.cfg["display"].get("VerifyTimestampColumn")
     cv_col = app.cfg["display"].get("CurrentValueColumn")
-    updates = _build_tag_updates(o, mapping, tr)
+    tester_col = app.cfg["display"].get("TesterColumn")
+    rows_to_write = dirty_rows if dirty_rows else set(mapping.keys())
+    updates = _build_tag_updates(o, mapping, tr, rows_to_write, tester)
+    if not updates:
+        return
     written, not_found = save_tag_verifications(app.eng.get(), ENGINEERING_SHEET, updates, status_col, ts_col, cv_col,
-                                                 header_row=ENGINEERING_HEADER_ROW)
+                                                 header_row=ENGINEERING_HEADER_ROW, tester_col_letter=tester_col)
     if not_found:
         messagebox.showwarning(
             "Some rows not matched",
@@ -117,7 +128,7 @@ def _save_tag_verifications(app, o, mapping, tr=None):
         )
 
 
-def _try_close(app, w, mapping, dirty_flag, o):
+def _try_close(app, w, mapping, dirty_flag, o, dirty_rows, tester_widget):
     if not dirty_flag["value"]:
         w.destroy()
         return
@@ -129,8 +140,12 @@ def _try_close(app, w, mapping, dirty_flag, o):
     if resp is None:
         return  # Cancel: keep popup open
     if resp is True:
+        tester_v = tester_widget.get().strip()
+        if not tester_v:
+            messagebox.showerror("Tester required", "Please enter a Tester Name before saving.")
+            return  # keep popup open so nothing is lost
         try:
-            _save_tag_verifications(app, o, mapping, tr=None)
+            _save_tag_verifications(app, o, mapping, tr=None, dirty_rows=dirty_rows, tester=tester_v)
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return  # keep popup open so nothing is lost
@@ -146,6 +161,7 @@ def open_detail_window(app, o):
     w.configure(bg=t["bg"])
 
     dirty_flag = {"value": False}
+    dirty_rows = set()
 
     h = ttk.Frame(w, padding=10)
     h.pack(fill="x")
@@ -156,13 +172,15 @@ def open_detail_window(app, o):
     cols = ("tag", "value", "saved", "address", "type", "access", "unit", "verify", "verifyTS")
     tr_frame = ttk.Frame(w)
     tr_frame.pack(fill="both", expand=True, padx=10)
+    tr_frame.grid_rowconfigure(0, weight=1)
+    tr_frame.grid_columnconfigure(0, weight=1)
     tr = ttk.Treeview(tr_frame, columns=cols, show="headings")
     for c, ttext, wd in [("tag", "Tag Name", 230), ("value", "PLC / OPC Value", 130), ("saved", "Saved Value", 110),
                           ("address", "Address", 110), ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
                           ("verify", "Verify Sts (dbl-click)", 130), ("verifyTS", "Verify TS", 80)]:
         tr.heading(c, text=ttext)
-        tr.column(c, width=wd)
-    tr.pack(side="left", fill="both", expand=True)
+        tr.column(c, width=wd, stretch=False)
+    tr.grid(row=0, column=0, sticky="nsew")
 
     def _on_tr_motion(event):
         region = tr.identify("region", event.x, event.y)
@@ -173,9 +191,11 @@ def open_detail_window(app, o):
             tr.configure(cursor="")
 
     tr.bind("<Motion>", _on_tr_motion)
-    tr_scroll = ttk.Scrollbar(tr_frame, orient="vertical", command=tr.yview)
-    tr_scroll.pack(side="right", fill="y")
-    tr.configure(yscrollcommand=tr_scroll.set)
+    tr_vscroll = ttk.Scrollbar(tr_frame, orient="vertical", command=tr.yview)
+    tr_vscroll.grid(row=0, column=1, sticky="ns")
+    tr_hscroll = ttk.Scrollbar(tr_frame, orient="horizontal", command=tr.xview)
+    tr_hscroll.grid(row=1, column=0, sticky="ew")
+    tr.configure(yscrollcommand=tr_vscroll.set, xscrollcommand=tr_hscroll.set)
 
     mapping = {}
     not_conn = o["PLC"] not in app.conns
@@ -183,12 +203,12 @@ def open_detail_window(app, o):
         iid = str(i)
         mapping[iid] = r
         saved = s(r.get("Current Value"))
-        init_val = saved if saved else ("Not Connected" if not_conn else "—")
+        init_val = saved if saved else ("-" if not_conn else "—")
         tr.insert("", "end", iid=iid, values=(
             s(r.get("Tag Name")), init_val, saved, get_address(r), s(r.get("Data Type")),
             s(r.get("Client Access")) or "R", s(r.get("Eng Units")),
             s(r.get("Verification Status") or "Not Tested"), s(r.get("Verification Time"))))
-    tr.bind("<Double-1>", lambda event: edit_verification_status(app, event, tr, mapping, dirty_flag))
+    tr.bind("<Double-1>", lambda event: edit_verification_status(app, event, tr, mapping, dirty_flag, dirty_rows))
 
     card = ttk.LabelFrame(w, text="Verification", padding=12)
     card.pack(fill="x", padx=10, pady=(8, 0))
@@ -255,6 +275,10 @@ def open_detail_window(app, o):
         cause_v = cause.get()
         tester_v = tester.get().strip()
         comment_v = comment.get("1.0", "end").strip()
+        if not tester_v:
+            check_tester()
+            messagebox.showerror("Tester required", "Please enter a Tester Name before saving.")
+            return
         try:
             save_general_comment(app.eng.get(), o["PLC"], o["Template"], o["Area"], o["Equipment"],
                                   status_v, cause_v, tester_v, comment_v)
@@ -265,7 +289,7 @@ def open_detail_window(app, o):
         app.populate_sidebar()
         app.render_objects()
         try:
-            _save_tag_verifications(app, o, mapping, tr)
+            _save_tag_verifications(app, o, mapping, tr, dirty_rows=dirty_rows, tester=tester_v)
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return  # keep popup open so nothing is lost
@@ -278,6 +302,6 @@ def open_detail_window(app, o):
     ttk.Button(btn_row, text="Read All Parameters", command=lambda: read_all(app, o, tr, mapping), padding=(10, 6)).pack(side="left", padx=10, pady=8)
     ttk.Button(btn_row, text="Save Verification", command=save, padding=(14, 6), style="Accent.TButton").pack(side="right", padx=10, pady=8)
 
-    w.protocol("WM_DELETE_WINDOW", lambda: _try_close(app, w, mapping, dirty_flag, o))
+    w.protocol("WM_DELETE_WINDOW", lambda: _try_close(app, w, mapping, dirty_flag, o, dirty_rows, tester))
 
     read_all(app, o, tr, mapping)

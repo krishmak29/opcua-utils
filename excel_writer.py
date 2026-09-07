@@ -20,7 +20,7 @@ def _find_header_col(headers, *names):
     return None
 
 
-def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_letter, current_value_col_letter=None, header_row=1):
+def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_letter, current_value_col_letter=None, header_row=1, tester_col_letter=None):
     """
     Write per-tag Verification Status / Verification Time back into the engineering
     Excel file, matching rows by PLC + Tag Name + Address (tolerant of 'Address*'
@@ -61,6 +61,7 @@ def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_
     status_col = column_index_from_string(status_col_letter)
     ts_col = column_index_from_string(ts_col_letter)
     cv_col = column_index_from_string(current_value_col_letter) if current_value_col_letter else None
+    tester_col = column_index_from_string(tester_col_letter) if tester_col_letter else None
 
     written = 0
     not_found = []
@@ -73,6 +74,8 @@ def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_
         ws.cell(row=row_idx, column=ts_col).value = u.get("Verification Time")
         if cv_col:
             ws.cell(row=row_idx, column=cv_col).value = u.get("Current Value")
+        if tester_col:
+            ws.cell(row=row_idx, column=tester_col).value = u.get("Tester Name")
         written += 1
 
     wb.save(path)

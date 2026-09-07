@@ -92,7 +92,7 @@ def _compute_tag_name(r):
     return "".join(parts)
 
 
-def load_engineering(path, status_col_letter=None, ts_col_letter=None, cv_col_letter=None):
+def load_engineering(path, status_col_letter=None, ts_col_letter=None, cv_col_letter=None, tester_col_letter=None):
     wb = load_workbook(_sanitize_workbook_bytes(path), data_only=True)
     if ENGINEERING_SHEET in wb.sheetnames:
         sheet = ENGINEERING_SHEET
@@ -126,6 +126,7 @@ def load_engineering(path, status_col_letter=None, ts_col_letter=None, cv_col_le
     status_col = column_index_from_string(status_col_letter) if status_col_letter else None
     ts_col = column_index_from_string(ts_col_letter) if ts_col_letter else None
     cv_col = column_index_from_string(cv_col_letter) if cv_col_letter else None
+    tester_col = column_index_from_string(tester_col_letter) if tester_col_letter else None
     for r in data:
         row_idx = r.get("_row")
         if row_idx is None:
@@ -136,20 +137,22 @@ def load_engineering(path, status_col_letter=None, ts_col_letter=None, cv_col_le
             r["Verification Time"] = s(ws.cell(row=row_idx, column=ts_col).value)
         if cv_col:
             r["Current Value"] = s(ws.cell(row=row_idx, column=cv_col).value)
+        if tester_col:
+            r["Tester Name"] = s(ws.cell(row=row_idx, column=tester_col).value)
     return data
 
 
 def load_config(path):
     if not Path(path).exists():
         return {"plc": {}, "display": {"ObjectsPerPage": 12, "RefreshRateMs": 1000, "MainValueSuffix": "RD.PV",
-                                        "VerifyStatusColumn": "", "VerifyTimestampColumn": "", "CurrentValueColumn": ""},
+                                        "VerifyStatusColumn": "", "VerifyTimestampColumn": "", "CurrentValueColumn": "", "TesterColumn": ""},
                 "causes": [("C001", "Wrong PLC value"), ("C002", "Wrong SCADA value"), ("C003", "Communication failure"),
                            ("C004", "Wrong scaling"), ("C005", "Wrong engineering unit"), ("C006", "Wrong alarm status"),
                            ("C007", "Wrong tag mapping"), ("C008", "Object not available"), ("C009", "PLC not available"), ("C010", "Other")]}
     wb = load_workbook(_sanitize_workbook_bytes(path), data_only=True)
     pc = {s(r.get("PLC")): r for r in rows(wb, "PLC_Config") if s(r.get("PLC"))}
     d = {"ObjectsPerPage": 12, "RefreshRateMs": 1000, "MainValueSuffix": "RD.PV",
-         "VerifyStatusColumn": "", "VerifyTimestampColumn": "", "CurrentValueColumn": ""}
+         "VerifyStatusColumn": "", "VerifyTimestampColumn": "", "CurrentValueColumn": "", "TesterColumn": ""}
     for r in rows(wb, "Display_Config"):
         if s(r.get("Parameter")):
             d[s(r["Parameter"])] = r.get("Value")
