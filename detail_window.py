@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
-from data_io import s, get_address, key
+from data_io import s, get_address, key, ENGINEERING_HEADER_ROW, ENGINEERING_SHEET
 from excel_writer import save_tag_verifications, save_general_comment
 
 
@@ -15,8 +15,8 @@ def edit_verification_status(app, event, tr, mapping, dirty_flag):
         return
     row_id = tr.identify_row(event.y)
     column_id = tr.identify_column(event.x)
-    # Verification Status = column 7
-    if not row_id or column_id != "#7":
+    # Verification Status = column 8
+    if not row_id or column_id != "#8":
         return
     bbox = tr.bbox(row_id, column_id)
     if not bbox:
@@ -35,8 +35,8 @@ def edit_verification_status(app, event, tr, mapping, dirty_flag):
     def save_status(event=None):
         new_value = combo.get()
         verification_time = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        tr.set(row_id, "#7", new_value)
-        tr.set(row_id, "#8", verification_time)
+        tr.set(row_id, "#8", new_value)
+        tr.set(row_id, "#9", verification_time)
         if row_id in mapping:
             mapping[row_id]["Verification Status"] = new_value
             mapping[row_id]["Verification Time"] = verification_time
@@ -52,6 +52,11 @@ def setv(tr, iid, v):
     x = list(tr.item(iid, "values"))
     x[1] = str(v)
     tr.item(iid, values=x)
+
+
+def getv(tr, iid):
+    x = tr.item(iid, "values")
+    return x[1] if x else ""
 
 
 def read_all(app, o, tr, mapping):
@@ -79,29 +84,36 @@ def read_all(app, o, tr, mapping):
     threading.Thread(target=work, daemon=True).start()
 
 
-def _build_tag_updates(o, mapping):
+def _build_tag_updates(o, mapping, tr=None):
     updates = []
-    for r in mapping.values():
+    for iid, r in mapping.items():
+        cv = getv(tr, iid) if tr is not None else ""
+        if cv in ("Not Connected", "Reading...", "—"):
+            cv = ""
         updates.append({
+            "_row": r.get("_row"),
             "PLC": o["PLC"],
             "Tag Name": r.get("Tag Name"),
             "Address": get_address(r),
             "Verification Status": r.get("Verification Status") or "Not Tested",
             "Verification Time": r.get("Verification Time") or "",
+            "Current Value": cv,
         })
     return updates
 
 
-def _save_tag_verifications(app, o, mapping):
+def _save_tag_verifications(app, o, mapping, tr=None):
     status_col = app.cfg["display"].get("VerifyStatusColumn")
     ts_col = app.cfg["display"].get("VerifyTimestampColumn")
-    updates = _build_tag_updates(o, mapping)
-    written, not_found = save_tag_verifications(app.eng.get(), "Objects", updates, status_col, ts_col)
+    cv_col = app.cfg["display"].get("CurrentValueColumn")
+    updates = _build_tag_updates(o, mapping, tr)
+    written, not_found = save_tag_verifications(app.eng.get(), ENGINEERING_SHEET, updates, status_col, ts_col, cv_col,
+                                                 header_row=ENGINEERING_HEADER_ROW)
     if not_found:
         messagebox.showwarning(
             "Some rows not matched",
-            f"{written} row(s) saved. {len(not_found)} tag(s) could not be matched in the "
-            f"Excel sheet (PLC/Tag Name/Address mismatch) and were not written."
+            f"{written} row(s) saved. {len(not_found)} tag(s) had no source row reference "
+            f"(engineering file may need reloading) and were not written."
         )
 
 
@@ -118,7 +130,7 @@ def _try_close(app, w, mapping, dirty_flag, o):
         return  # Cancel: keep popup open
     if resp is True:
         try:
-            _save_tag_verifications(app, o, mapping)
+            _save_tag_verifications(app, o, mapping, tr=None)
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return  # keep popup open so nothing is lost
@@ -141,12 +153,12 @@ def open_detail_window(app, o):
     ttk.Label(h, text=f"Template: {o['Template']}").pack(anchor="w")
     ttk.Label(h, text=f"PLC: {o['PLC']} | Area: {o['Area']}").pack(anchor="w")
 
-    cols = ("tag", "value", "address", "type", "access", "unit", "verify", "verifyTS")
+    cols = ("tag", "value", "saved", "address", "type", "access", "unit", "verify", "verifyTS")
     tr_frame = ttk.Frame(w)
     tr_frame.pack(fill="both", expand=True, padx=10)
     tr = ttk.Treeview(tr_frame, columns=cols, show="headings")
-    for c, ttext, wd in [("tag", "Tag Name", 230), ("value", "PLC / OPC Value", 130), ("address", "Address", 110),
-                          ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
+    for c, ttext, wd in [("tag", "Tag Name", 230), ("value", "PLC / OPC Value", 130), ("saved", "Saved Value", 110),
+                          ("address", "Address", 110), ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
                           ("verify", "Verify Sts (dbl-click)", 130), ("verifyTS", "Verify TS", 80)]:
         tr.heading(c, text=ttext)
         tr.column(c, width=wd)
@@ -155,7 +167,7 @@ def open_detail_window(app, o):
     def _on_tr_motion(event):
         region = tr.identify("region", event.x, event.y)
         col = tr.identify_column(event.x)
-        if region == "cell" and col == "#7":
+        if region == "cell" and col == "#8":
             tr.configure(cursor="hand2")
         else:
             tr.configure(cursor="")
@@ -167,12 +179,13 @@ def open_detail_window(app, o):
 
     mapping = {}
     not_conn = o["PLC"] not in app.conns
-    init_val = "Not Connected" if not_conn else "—"
     for i, r in enumerate(o["Rows"]):
         iid = str(i)
         mapping[iid] = r
+        saved = s(r.get("Current Value"))
+        init_val = saved if saved else ("Not Connected" if not_conn else "—")
         tr.insert("", "end", iid=iid, values=(
-            s(r.get("Tag Name")), init_val, get_address(r), s(r.get("Data Type")),
+            s(r.get("Tag Name")), init_val, saved, get_address(r), s(r.get("Data Type")),
             s(r.get("Client Access")) or "R", s(r.get("Eng Units")),
             s(r.get("Verification Status") or "Not Tested"), s(r.get("Verification Time"))))
     tr.bind("<Double-1>", lambda event: edit_verification_status(app, event, tr, mapping, dirty_flag))
@@ -180,8 +193,8 @@ def open_detail_window(app, o):
     card = ttk.LabelFrame(w, text="Verification", padding=12)
     card.pack(fill="x", padx=10, pady=(8, 0))
 
-    result = tk.StringVar(value=(app.comments.get(key(o)) or {}).get("status") or "Correct")
-    pill_colors = {"Correct": t["success"], "Incorrect": t["danger"], "Recheck": t["warning"]}
+    result = tk.StringVar(value=(app.comments.get(key(o)) or {}).get("status") or "Not Tested")
+    pill_colors = {"Not Tested": t["muted"], "Correct": t["success"], "Incorrect": t["danger"], "Recheck": t["warning"]}
     pill_buttons = {}
 
     def refresh_pills():
@@ -200,7 +213,7 @@ def open_detail_window(app, o):
 
     result_frame = ttk.Frame(top_row)
     result_frame.pack(side="left")
-    for val in ("Correct", "Incorrect", "Recheck"):
+    for val in ("Not Tested", "Correct", "Incorrect", "Recheck"):
         b = tk.Button(result_frame, text=val, width=11, relief="flat", cursor="hand2", bd=0,
                       activeforeground="#FFFFFF", command=lambda v=val: pick_result(v))
         b.pack(side="left", padx=(0, 6), ipady=4)
@@ -251,13 +264,12 @@ def open_detail_window(app, o):
         app.comments[key(o)] = {"status": status_v, "cause": cause_v, "tester": tester_v, "comment": comment_v}
         app.populate_sidebar()
         app.render_objects()
-        if dirty_flag["value"]:
-            try:
-                _save_tag_verifications(app, o, mapping)
-            except Exception as e:
-                messagebox.showerror("Save failed", str(e))
-                return  # keep popup open so nothing is lost
-            dirty_flag["value"] = False
+        try:
+            _save_tag_verifications(app, o, mapping, tr)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return  # keep popup open so nothing is lost
+        dirty_flag["value"] = False
         w.destroy()
 
     ttk.Separator(w).pack(fill="x", padx=10, pady=(10, 0))

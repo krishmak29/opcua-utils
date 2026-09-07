@@ -3,6 +3,7 @@
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinter import filedialog
 
 from config import ENGINEERING, CONFIG
 from theme import THEMES
@@ -167,7 +168,13 @@ class App(tk.Tk):
 
     def load(self):
         try:
-            self.objects = group(load_engineering(self.eng.get()))
+            d = self.cfg["display"]
+            self.objects = group(load_engineering(
+                self.eng.get(),
+                status_col_letter=d.get("VerifyStatusColumn"),
+                ts_col_letter=d.get("VerifyTimestampColumn"),
+                cv_col_letter=d.get("CurrentValueColumn"),
+            ))
             self.comments = load_general_comments(self.eng.get())
             self.byplc = {}
             for o in self.objects:
@@ -188,12 +195,26 @@ class App(tk.Tk):
         w.configure(bg=self.colors()["bg"])
         f = ttk.Frame(w, padding=12)
         f.pack(fill="both", expand=True)
+        def browse_eng():
+            path = filedialog.askopenfilename(title="Select Engineering Excel",
+                                               filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")])
+            if path:
+                self.eng.set(path)
+
+        def browse_cfg():
+            path = filedialog.askopenfilename(title="Select Config File",
+                                               filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")])
+            if path:
+                self.cf.set(path)
+
         ttk.Label(f, text="Engineering Excel:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(f, textvariable=self.eng, width=45).grid(row=0, column=1, padx=5, pady=4)
-        ttk.Button(f, text="Load", command=self.load).grid(row=0, column=2)
+        ttk.Entry(f, textvariable=self.eng, width=40).grid(row=0, column=1, padx=5, pady=4)
+        ttk.Button(f, text="Browse...", command=browse_eng).grid(row=0, column=2, padx=(0, 4))
+        ttk.Button(f, text="Load", command=self.load).grid(row=0, column=3)
         ttk.Label(f, text="Config File:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(f, textvariable=self.cf, width=45).grid(row=1, column=1, padx=5, pady=4)
-        ttk.Button(f, text="Reload Config", command=self.reload).grid(row=1, column=2)
+        ttk.Entry(f, textvariable=self.cf, width=40).grid(row=1, column=1, padx=5, pady=4)
+        ttk.Button(f, text="Browse...", command=browse_cfg).grid(row=1, column=2, padx=(0, 4))
+        ttk.Button(f, text="Reload Config", command=self.reload).grid(row=1, column=3)
         ttk.Button(f, text="Close", command=w.destroy).grid(row=3, column=2, pady=(20, 0), sticky="e")
 
     def populate_sidebar(self):
@@ -204,7 +225,7 @@ class App(tk.Tk):
             if q and q not in plc.lower():
                 continue
             total = len(self.byplc[plc])
-            tested = sum(bool(self.comments.get(key(o))) for o in self.byplc[plc])
+            tested = sum((self.comments.get(key(o)) or {}).get("status", "Not Tested") != "Not Tested" for o in self.byplc[plc])
             connected = plc in self.conns
             tag = "connected" if connected else "disconnected"
             self.plc_list.insert("", "end", iid=plc, text=plc, values=(f"{tested}/{total}", "●"), tags=(tag,))
@@ -223,7 +244,7 @@ class App(tk.Tk):
         x = self.byplc.get(self.current_plc, [])
         fl = self.filter.get()
         if fl == "Not Tested":
-            return [o for o in x if not self.comments.get(key(o))]
+            return [o for o in x if (self.comments.get(key(o)) or {}).get("status", "Not Tested") == "Not Tested"]
         if fl in ("Correct", "Incorrect", "Recheck"):
             return [o for o in x if (self.comments.get(key(o)) or {}).get("status") == fl]
         return x
@@ -243,7 +264,7 @@ class App(tk.Tk):
             self.obj_list.insert("", "end", iid=iid, text=o["Equipment"], values=(o["Template"], o["Area"], result))
         self.pvar.set(f"{len(x)} object(s)")
         total = len(self.byplc[self.current_plc])
-        tested = sum(bool(self.comments.get(key(o))) for o in self.byplc[self.current_plc])
+        tested = sum((self.comments.get(key(o)) or {}).get("status", "Not Tested") != "Not Tested" for o in self.byplc[self.current_plc])
         self.info.config(text=f"{self.current_plc} | Total: {total} | Tested: {tested} | Remaining: {total-tested}")
 
     def open_selected(self):
@@ -279,8 +300,7 @@ class App(tk.Tk):
 
     def update_progress(self):
         n = len(self.objects)
-        rec = [self.comments.get(key(o)) for o in self.objects]
-        t = sum(bool(x) for x in rec)
+        t = sum((self.comments.get(key(o)) or {}).get("status", "Not Tested") != "Not Tested" for o in self.objects)
         self.progress.set(f"Overall: {n} Objects | {t} Tested | {n-t} Remaining")
 
     def close(self):

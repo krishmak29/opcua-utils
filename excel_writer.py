@@ -5,7 +5,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string
 
-from data_io import s
+from data_io import s, _sanitize_workbook_bytes
 
 GENERAL_COMMENTS_SHEET = "General Comments"
 GENERAL_COMMENTS_HEADERS = ["Sr No", "PLC", "Template", "Area Code*", "Equipment Number*",
@@ -20,7 +20,7 @@ def _find_header_col(headers, *names):
     return None
 
 
-def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_letter):
+def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_letter, current_value_col_letter=None, header_row=1):
     """
     Write per-tag Verification Status / Verification Time back into the engineering
     Excel file, matching rows by PLC + Tag Name + Address (tolerant of 'Address*'
@@ -39,13 +39,15 @@ def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_
             "(Display_Config sheet)."
         )
 
-    wb = load_workbook(path)  # NOT data_only, so formulas elsewhere in the sheet are preserved
+    wb_data = load_workbook(_sanitize_workbook_bytes(path), data_only=True)  # for matching: reads computed formula results
+    wb = load_workbook(_sanitize_workbook_bytes(path))  # NOT data_only, so formulas elsewhere in the sheet are preserved on save
     if sheet_name not in wb.sheetnames:
         sheet_name = "Objects" if "Objects" in wb.sheetnames else wb.sheetnames[0]
+    ws_data = wb_data[sheet_name]
     ws = wb[sheet_name]
 
     headers = {}
-    for cell in ws[1]:
+    for cell in ws_data[header_row]:
         h = s(cell.value)
         if h:
             headers[h] = cell.column
@@ -58,29 +60,47 @@ def save_tag_verifications(path, sheet_name, updates, status_col_letter, ts_col_
 
     status_col = column_index_from_string(status_col_letter)
     ts_col = column_index_from_string(ts_col_letter)
+    cv_col = column_index_from_string(current_value_col_letter) if current_value_col_letter else None
 
-    pending = {(s(u.get("PLC")), s(u.get("Tag Name")), s(u.get("Address"))): u for u in updates}
     written = 0
-    for row_idx in range(2, ws.max_row + 1):
-        plc_v = s(ws.cell(row=row_idx, column=plc_col).value)
-        tag_v = s(ws.cell(row=row_idx, column=tag_col).value)
-        addr_v = s(ws.cell(row=row_idx, column=addr_col).value)
-        k = (plc_v, tag_v, addr_v)
-        u = pending.pop(k, None)
-        if u is None:
+    not_found = []
+    for u in updates:
+        row_idx = u.get("_row")
+        if row_idx is None:
+            not_found.append((s(u.get("PLC")), s(u.get("Tag Name")), s(u.get("Address"))))
             continue
         ws.cell(row=row_idx, column=status_col).value = u.get("Verification Status")
         ws.cell(row=row_idx, column=ts_col).value = u.get("Verification Time")
+        if cv_col:
+            ws.cell(row=row_idx, column=cv_col).value = u.get("Current Value")
         written += 1
 
     wb.save(path)
-    return written, list(pending.keys())
+    return written, not_found
+
+def load_current_values(path, sheet_name, row_numbers, current_value_col_letter, header_row=1):
+    """Read Current Value directly from the configured column, matched by
+    the row's literal Excel row number. Returns dict keyed by row number -> value."""
+    if not current_value_col_letter:
+        return {}
+    wb = load_workbook(_sanitize_workbook_bytes(path), data_only=True)
+    if sheet_name not in wb.sheetnames:
+        sheet_name = "Objects" if "Objects" in wb.sheetnames else wb.sheetnames[0]
+    ws = wb[sheet_name]
+
+    cv_col = column_index_from_string(current_value_col_letter)
+    out = {}
+    for row_idx in row_numbers:
+        if row_idx is None:
+            continue
+        out[row_idx] = s(ws.cell(row=row_idx, column=cv_col).value)
+    return out
 
 def load_general_comments(path):
     """Return dict keyed by 'PLC|Area|Equipment' -> dict with status/cause/tester/comment/sr."""
     if not Path(path).exists():
         return {}
-    wb = load_workbook(path, data_only=True)
+    wb = load_workbook(_sanitize_workbook_bytes(path), data_only=True)
     if GENERAL_COMMENTS_SHEET not in wb.sheetnames:
         return {}
     ws = wb[GENERAL_COMMENTS_SHEET]
@@ -101,7 +121,7 @@ def save_general_comment(path, plc, template, area, equipment, status, cause, te
     """Write/overwrite one equipment-level row in the General Comments sheet.
     Matches by PLC + Area + Equipment. Overwrite keeps the existing Sr No;
     a new row gets max(Sr No) + 1. Creates the sheet with headers if missing."""
-    wb = load_workbook(path)
+    wb = load_workbook(_sanitize_workbook_bytes(path))
     if GENERAL_COMMENTS_SHEET not in wb.sheetnames:
         ws = wb.create_sheet(GENERAL_COMMENTS_SHEET)
         ws.append(GENERAL_COMMENTS_HEADERS)
@@ -111,6 +131,7 @@ def save_general_comment(path, plc, template, area, equipment, status, cause, te
     target_key = (s(plc), s(area), s(equipment))
     max_sr = 0
     match_row = None
+    first_empty_row = None
     for r in range(2, ws.max_row + 1):
         row_plc = s(ws.cell(row=r, column=2).value)
         row_area = s(ws.cell(row=r, column=4).value)
@@ -118,11 +139,14 @@ def save_general_comment(path, plc, template, area, equipment, status, cause, te
         sr_val = ws.cell(row=r, column=1).value
         if isinstance(sr_val, (int, float)):
             max_sr = max(max_sr, int(sr_val))
+        if not row_plc and not row_eq and first_empty_row is None:
+            first_empty_row = r
         if (row_plc, row_area, row_eq) == target_key:
             match_row = r
+            break
 
     if match_row is None:
-        match_row = ws.max_row + 1
+        match_row = first_empty_row if first_empty_row is not None else ws.max_row + 1
         ws.cell(row=match_row, column=1).value = max_sr + 1
 
     ws.cell(row=match_row, column=2).value = plc
