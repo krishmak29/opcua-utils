@@ -174,16 +174,26 @@ class App(tk.Tk):
         self.cfg = load_config(self.cf.get())
         self.load()
 
-    def load(self, popup=None, on_done=None):
+    def load(self, popup=None, on_done=None, cancelable=True):
         """Reads the engineering Excel file in a background thread so the UI
         never freezes. Pass an existing `popup` (from _show_saving_popup) to
         reuse/relabel it instead of creating a second one; `on_done` runs
-        after the UI has been refreshed, whether load succeeded or failed."""
+        after the UI has been refreshed, whether load succeeded or failed.
+        `cancelable` only applies when this call creates its own popup (a
+        reload chained after Save to Excel is not cancelable, since the
+        write has already happened and the popup there is just showing the
+        follow-up reload)."""
         d = self.cfg["display"]
         eng_path = self.eng.get()
         own_popup = popup is None
+        cancel_state = {"cancelled": False}
+
+        def cancel():
+            cancel_state["cancelled"] = True
+            self.status.set("Load cancelled.")
+
         if own_popup:
-            popup = self._show_saving_popup("Loading data...")
+            popup = self._show_saving_popup("Loading data...", cancelable=cancelable, on_cancel=cancel)
         else:
             self._set_popup_text(popup, "Reloading data...")
 
@@ -198,9 +208,9 @@ class App(tk.Tk):
                 ))
                 comments = load_general_comments(eng_path)
             except Exception as e:
-                self.after(0, lambda: self._on_load_error(popup, e, on_done))
+                self.after(0, lambda e=e: self._on_load_error(popup, e, on_done, cancel_state))
                 return
-            self.after(0, lambda: self._on_load_done(popup, objects, comments, on_done))
+            self.after(0, lambda: self._on_load_done(popup, objects, comments, on_done, cancel_state))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -210,13 +220,17 @@ class App(tk.Tk):
                 if isinstance(w, ttk.Label):
                     w.config(text=text)
 
-    def _on_load_error(self, popup, e, on_done):
+    def _on_load_error(self, popup, e, on_done, cancel_state=None):
+        if cancel_state and cancel_state["cancelled"]:
+            return  # user already dismissed the popup; the load's result no longer matters
         popup.destroy()
         messagebox.showerror("Load error", str(e))
         if on_done:
             on_done()
 
-    def _on_load_done(self, popup, objects, comments, on_done):
+    def _on_load_done(self, popup, objects, comments, on_done, cancel_state=None):
+        if cancel_state and cancel_state["cancelled"]:
+            return  # user already dismissed the popup; the load's result no longer matters
         popup.destroy()
         self.objects = objects
         self.comments = comments
@@ -242,14 +256,13 @@ class App(tk.Tk):
         else:
             self.pending_label.config(text="")
 
-    def _show_saving_popup(self, text="Saving to Excel..."):
+    def _show_saving_popup(self, text="Saving to Excel...", cancelable=False, on_cancel=None):
         w = tk.Toplevel(self)
         w.title("Please wait")
         w.transient(self)
         w.resizable(False, False)
         w.configure(bg=self.colors()["bg"])
         w.grab_set()
-        w.protocol("WM_DELETE_WINDOW", lambda: None)
 
         f = ttk.Frame(w, padding=20)
         f.pack(fill="both", expand=True)
@@ -258,7 +271,22 @@ class App(tk.Tk):
         bar.pack()
         bar.start(12)
 
-        ww, wh = 300, 100
+        def cancel():
+            if on_cancel:
+                on_cancel()
+            w.destroy()
+
+        if cancelable:
+            # Lets the user get out of a hung/slow load (file not found, file
+            # locked, slow network path, etc.) instead of being stuck with no
+            # way to interact with the app until the background thread ends
+            # on its own.
+            ttk.Button(f, text="Cancel", command=cancel).pack(pady=(10, 0))
+            w.protocol("WM_DELETE_WINDOW", cancel)
+        else:
+            w.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        ww, wh = 300, 140 if cancelable else 100
         self.update_idletasks()
         px, py = self.winfo_rootx(), self.winfo_rooty()
         pw, ph = self.winfo_width(), self.winfo_height()
@@ -290,7 +318,7 @@ class App(tk.Tk):
                     header_row=ENGINEERING_HEADER_ROW,
                 )
             except Exception as e:
-                self.after(0, lambda: self._on_save_to_excel_error(popup, e))
+                self.after(0, lambda e=e: self._on_save_to_excel_error(popup, e))
                 return
             self.after(0, lambda: self._on_save_to_excel_done(popup, result))
 
