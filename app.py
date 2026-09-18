@@ -7,10 +7,11 @@ from tkinter import filedialog
 
 from config import ENGINEERING, CONFIG
 from theme import THEMES
-from data_io import load_engineering, load_config, group, key
-from excel_writer import load_general_comments
+from data_io import load_engineering, load_config, group, key, ENGINEERING_SHEET, ENGINEERING_HEADER_ROW
+from excel_writer import load_general_comments, save_pending_batch
 from opcua_client import Async, Conn
 from detail_window import open_detail_window
+import pending_store as ps
 
 
 class App(tk.Tk):
@@ -20,6 +21,7 @@ class App(tk.Tk):
         self.geometry("1250x780")
         self.cfg = load_config(CONFIG)
         self.comments = {}
+        self.last_tester_name = ""
         self.a = Async()
         self.objects = []
         self.byplc = {}
@@ -41,6 +43,10 @@ class App(tk.Tk):
         ttk.Button(top, text="Settings", command=self.open_settings, padding=(10, 5)).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="Disconnect", command=self.disconnect, padding=(10, 5)).pack(side="right", padx=(0, 8))
         ttk.Button(top, text="Connect All", command=self.connect, padding=(10, 5), style="Accent.TButton").pack(side="right", padx=(0, 8))
+        self.save_excel_btn = ttk.Button(top, text="Save to Excel", command=self.save_to_excel, padding=(10, 5), style="Accent.TButton")
+        self.save_excel_btn.pack(side="right", padx=(0, 8))
+        self.pending_label = ttk.Label(top, text="")
+        self.pending_label.pack(side="right", padx=(0, 8))
         self.status = tk.StringVar(value="Ready")
         ttk.Label(self, textvariable=self.status, padding=(8, 0)).pack(fill="x")
 
@@ -185,15 +191,69 @@ class App(tk.Tk):
             self.render_objects()
             self.status.set(f"Loaded {len(self.objects)} objects")
             self.update_progress()
+            self.refresh_pending_indicator()
         except Exception as e:
             messagebox.showerror("Load error", str(e))
+
+    def refresh_pending_indicator(self):
+        data = ps.load_pending()
+        n_tags = len(data.get("tags", {}))
+        n_eq = len(data.get("equipment", {}))
+        total = n_tags + n_eq
+        if total:
+            self.pending_label.config(text=f"Pending changes: {total} (not yet in Excel)")
+        else:
+            self.pending_label.config(text="")
+
+    def save_to_excel(self):
+        data = ps.load_pending()
+        tag_updates = list(data.get("tags", {}).values())
+        equipment_updates = list(data.get("equipment", {}).values())
+        if not tag_updates and not equipment_updates:
+            messagebox.showinfo("Save to Excel", "No pending changes to save.")
+            return
+
+        d = self.cfg["display"]
+        try:
+            result = save_pending_batch(
+                self.eng.get(), ENGINEERING_SHEET,
+                tag_updates,
+                d.get("VerifyStatusColumn"), d.get("VerifyTimestampColumn"),
+                d.get("CurrentValueColumn"), d.get("TesterColumn"),
+                equipment_updates,
+                header_row=ENGINEERING_HEADER_ROW,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Save to Excel failed",
+                f"{e}\n\nPending changes have been kept. You can retry once the issue is resolved."
+            )
+            return
+
+        ps.clear_pending()
+        msg = f"{result['tags_written']} tag update(s) and {result['equipment_written']} equipment update(s) saved to Excel."
+        if result["tags_mismatched"]:
+            msg += (f"\n\n{len(result['tags_mismatched'])} tag(s) were skipped because their source row no longer "
+                    f"matches (engineering file may have changed since these were verified): "
+                    + ", ".join(result["tags_mismatched"][:10])
+                    + (" ..." if len(result["tags_mismatched"]) > 10 else ""))
+        if result["tags_no_row"]:
+            msg += f"\n\n{len(result['tags_no_row'])} tag(s) had no source row reference and were skipped."
+        messagebox.showinfo("Save to Excel", msg)
+        self.load()
 
     def open_settings(self):
         w = tk.Toplevel(self)
         w.title("Settings")
-        w.geometry("520x300")
         w.transient(self)
         w.configure(bg=self.colors()["bg"])
+        ww, wh = 572, 300
+        self.update_idletasks()
+        px, py = self.winfo_rootx(), self.winfo_rooty()
+        pw, ph = self.winfo_width(), self.winfo_height()
+        x = px + (pw - ww) // 2
+        y = py + (ph - wh) // 2
+        w.geometry(f"{ww}x{wh}+{x}+{y}")
         f = ttk.Frame(w, padding=12)
         f.pack(fill="both", expand=True)
         def browse_eng():

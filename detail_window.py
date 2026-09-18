@@ -5,8 +5,26 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 
-from data_io import s, get_address, key, ENGINEERING_HEADER_ROW, ENGINEERING_SHEET
+from data_io import s, get_address, get_plc_address, key, ENGINEERING_HEADER_ROW, ENGINEERING_SHEET
 from excel_writer import save_tag_verifications, save_general_comment
+import pending_store as ps
+
+
+def set_verification_status(tr, mapping, dirty_flag, dirty_rows, row_id, new_value):
+    """Shared status-update mechanism: used by the double-click combobox editor
+    and by the six Ctrl+<key> verification shortcuts alike, so the update logic
+    exists in exactly one place."""
+    verification_time = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    live_value = tr.set(row_id, "#2")
+    tr.set(row_id, "#3", live_value)
+    tr.set(row_id, "#8", new_value)
+    tr.set(row_id, "#9", verification_time)
+    if row_id in mapping:
+        mapping[row_id]["Verification Status"] = new_value
+        mapping[row_id]["Verification Time"] = verification_time
+        mapping[row_id]["Current Value"] = live_value
+    dirty_flag["value"] = True
+    dirty_rows.add(row_id)
 
 
 def edit_verification_status(app, event, tr, mapping, dirty_flag, dirty_rows):
@@ -33,23 +51,40 @@ def edit_verification_status(app, event, tr, mapping, dirty_flag, dirty_rows):
     combo.focus_set()
 
     def save_status(event=None):
-        new_value = combo.get()
-        verification_time = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        live_value = tr.set(row_id, "#2")
-        tr.set(row_id, "#3", live_value)
-        tr.set(row_id, "#8", new_value)
-        tr.set(row_id, "#9", verification_time)
-        if row_id in mapping:
-            mapping[row_id]["Verification Status"] = new_value
-            mapping[row_id]["Verification Time"] = verification_time
-            mapping[row_id]["Current Value"] = live_value
-        dirty_flag["value"] = True
-        dirty_rows.add(row_id)
+        set_verification_status(tr, mapping, dirty_flag, dirty_rows, row_id, combo.get())
         combo.destroy()
 
     combo.bind("<<ComboboxSelected>>", save_status)
     combo.bind("<Return>", save_status)
     combo.bind("<Escape>", lambda e: combo.destroy())
+
+
+VERIFICATION_SHORTCUTS = {
+    "o": "OK",
+    "r": "Recheck",
+    "m": "SCADA-Value Mismatch",
+    "i": "SCADA-Linking issue",
+    "q": "Not Available",
+    "k": "Not Ok",
+}
+
+
+def bind_verification_shortcuts(tr, mapping, dirty_flag, dirty_rows):
+    """Ctrl+O/R/M/I/Q/K set the selected tag row's Verification Status via the
+    same set_verification_status() mechanism as the double-click editor. No
+    selected row -> no action, no popup/error (per locked spec 6.3)."""
+    def handler(status):
+        def _handle(event):
+            sel = tr.selection()
+            if not sel:
+                return
+            row_id = sel[0]
+            set_verification_status(tr, mapping, dirty_flag, dirty_rows, row_id, status)
+        return _handle
+
+    for letter, status in VERIFICATION_SHORTCUTS.items():
+        tr.bind(f"<Control-{letter}>", handler(status))
+        tr.bind(f"<Control-{letter.upper()}>", handler(status))
 
 
 def setv(tr, iid, v):
@@ -109,22 +144,23 @@ def _build_tag_updates(o, mapping, tr=None, dirty_rows=None, tester=""):
     return updates
 
 
-def _save_tag_verifications(app, o, mapping, tr=None, dirty_rows=None, tester=""):
-    status_col = app.cfg["display"].get("VerifyStatusColumn")
-    ts_col = app.cfg["display"].get("VerifyTimestampColumn")
-    cv_col = app.cfg["display"].get("CurrentValueColumn")
-    tester_col = app.cfg["display"].get("TesterColumn")
+def _save_tag_verifications_pending(o, mapping, tr=None, dirty_rows=None, tester=""):
+    """Popup Save: write dirty tag rows into pending_changes.json instead of
+    Excel. Excel is only touched by the main screen's batch 'Save to Excel'
+    action (Phase 3)."""
     rows_to_write = dirty_rows if dirty_rows else set(mapping.keys())
     updates = _build_tag_updates(o, mapping, tr, rows_to_write, tester)
-    if not updates:
-        return
-    written, not_found = save_tag_verifications(app.eng.get(), ENGINEERING_SHEET, updates, status_col, ts_col, cv_col,
-                                                 header_row=ENGINEERING_HEADER_ROW, tester_col_letter=tester_col)
-    if not_found:
+    skipped_no_row = 0
+    for u in updates:
+        if u.get("_row") is None:
+            skipped_no_row += 1
+            continue
+        ps.merge_tag_update(u)
+    if skipped_no_row:
         messagebox.showwarning(
             "Some rows not matched",
-            f"{written} row(s) saved. {len(not_found)} tag(s) had no source row reference "
-            f"(engineering file may need reloading) and were not written."
+            f"{skipped_no_row} tag(s) had no source row reference "
+            f"(engineering file may need reloading) and were not saved."
         )
 
 
@@ -145,10 +181,11 @@ def _try_close(app, w, mapping, dirty_flag, o, dirty_rows, tester_widget):
             messagebox.showerror("Tester required", "Please enter a Tester Name before saving.")
             return  # keep popup open so nothing is lost
         try:
-            _save_tag_verifications(app, o, mapping, tr=None, dirty_rows=dirty_rows, tester=tester_v)
+            _save_tag_verifications_pending(o, mapping, tr=None, dirty_rows=dirty_rows, tester=tester_v)
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return  # keep popup open so nothing is lost
+        app.last_tester_name = tester_v
     dirty_flag["value"] = False
     w.destroy()
 
@@ -157,8 +194,14 @@ def open_detail_window(app, o):
     t = app.colors()
     w = tk.Toplevel(app)
     w.title(o["Equipment"] + " - Verification")
-    w.geometry("1050x680")
     w.configure(bg=t["bg"])
+    ww, wh = 1050, 680
+    app.update_idletasks()
+    px, py = app.winfo_rootx(), app.winfo_rooty()
+    pw, ph = app.winfo_width(), app.winfo_height()
+    x = px + (pw - ww) // 2
+    y = py + (ph - wh) // 2
+    w.geometry(f"{ww}x{wh}+{x}+{y}")
 
     dirty_flag = {"value": False}
     dirty_rows = set()
@@ -170,13 +213,18 @@ def open_detail_window(app, o):
     ttk.Label(h, text=f"PLC: {o['PLC']} | Area: {o['Area']}").pack(anchor="w")
 
     cols = ("tag", "value", "saved", "address", "type", "access", "unit", "verify", "verifyTS")
+    COLUMN_LABELS = {
+        "tag": "Tag Name", "value": "PLC / OPC Value", "saved": "Saved Value",
+        "address": "PLC Address", "type": "Data Type", "access": "Access",
+        "unit": "Eng Units", "verify": "Verify Status", "verifyTS": "Verify TS",
+    }
     tr_frame = ttk.Frame(w)
     tr_frame.pack(fill="both", expand=True, padx=10)
     tr_frame.grid_rowconfigure(0, weight=1)
     tr_frame.grid_columnconfigure(0, weight=1)
     tr = ttk.Treeview(tr_frame, columns=cols, show="headings")
     for c, ttext, wd in [("tag", "Tag Name", 230), ("value", "PLC / OPC Value", 130), ("saved", "Saved Value", 110),
-                          ("address", "Address", 110), ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
+                          ("address", "PLC Address (click to sort)", 160), ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
                           ("verify", "Verify Sts (dbl-click)", 130), ("verifyTS", "Verify TS", 80)]:
         tr.heading(c, text=ttext)
         tr.column(c, width=wd, stretch=False)
@@ -201,14 +249,180 @@ def open_detail_window(app, o):
     not_conn = o["PLC"] not in app.conns
     for i, r in enumerate(o["Rows"]):
         iid = str(i)
+        pending = ps.get_pending_tag(r.get("_row"))
+        if pending:
+            # A pending JSON edit exists for this Excel row from an earlier
+            # popup Save that hasn't been committed to Excel yet -- show
+            # that instead of the (now-stale, from this popup's perspective)
+            # Excel-loaded value (locked spec 3.7).
+            r["Verification Status"] = pending.get("Verification Status") or r.get("Verification Status")
+            r["Verification Time"] = pending.get("Verification Time") or r.get("Verification Time")
+            r["Current Value"] = pending.get("Current Value") or r.get("Current Value")
         mapping[iid] = r
         saved = s(r.get("Current Value"))
         init_val = saved if saved else ("-" if not_conn else "—")
         tr.insert("", "end", iid=iid, values=(
-            s(r.get("Tag Name")), init_val, saved, get_address(r), s(r.get("Data Type")),
+            s(r.get("Tag Name")), init_val, saved, get_plc_address(r), s(r.get("Data Type")),
             s(r.get("Client Access")) or "R", s(r.get("Eng Units")),
             s(r.get("Verification Status") or "Not Tested"), s(r.get("Verification Time"))))
     tr.bind("<Double-1>", lambda event: edit_verification_status(app, event, tr, mapping, dirty_flag, dirty_rows))
+    bind_verification_shortcuts(tr, mapping, dirty_flag, dirty_rows)
+
+    column_filter_state = {c: None for c in cols}
+    column_sort_state = {"col": None, "asc": True}
+    column_filter_buttons = {}
+
+    def _column_value(iid, col):
+        if col == "address":
+            return get_plc_address(mapping[iid])
+        return tr.set(iid, col)
+
+    def _column_x_offset(col):
+        x = 0
+        for c in cols:
+            if c == col:
+                break
+            x += int(tr.column(c, "width"))
+        return x
+
+    def _place_column_filter_buttons():
+        for c, btn in column_filter_buttons.items():
+            x = _column_x_offset(c)
+            width = int(tr.column(c, "width"))
+            btn.place(in_=tr, x=x + width - 20, y=1, width=18, height=20)
+
+    def refresh_view():
+        items = list(mapping.items())
+        for c, selected in column_filter_state.items():
+            if selected is not None:
+                items = [(iid, r) for iid, r in items if _column_value(iid, c) in selected]
+        sort_col = column_sort_state["col"]
+        if sort_col:
+            items.sort(key=lambda kv: _column_value(kv[0], sort_col).lower(), reverse=not column_sort_state["asc"])
+        else:
+            items.sort(key=lambda kv: int(kv[0]))
+        visible = {iid for iid, _ in items}
+        for iid in mapping:
+            if iid not in visible:
+                tr.detach(iid)
+        for idx, (iid, _r) in enumerate(items):
+            tr.move(iid, "", idx)
+
+    def open_column_filter_popup(col):
+        label = COLUMN_LABELS.get(col, col)
+        all_values = sorted({v for v in (_column_value(iid, col) for iid in mapping) if v})
+        current = column_filter_state[col]
+        checked = {v: (current is None or v in current) for v in all_values}
+
+        pop = tk.Toplevel(w)
+        pop.title(f"{label} Filter")
+        pop.transient(w)
+        pop.configure(bg=t["panel"])
+        pop.minsize(260, 320)
+        btn = column_filter_buttons[col]
+        x = btn.winfo_rootx()
+        y = btn.winfo_rooty() + btn.winfo_height()
+        pop.geometry(f"280x480+{x}+{y}")
+
+        sort_row = ttk.Frame(pop, padding=(8, 8, 8, 4))
+        sort_row.pack(fill="x")
+
+        def do_sort(asc):
+            column_sort_state["col"] = col
+            column_sort_state["asc"] = asc
+            refresh_view()
+
+        ttk.Button(sort_row, text="Sort A→Z", command=lambda: do_sort(True)).pack(side="left", padx=(0, 4))
+        ttk.Button(sort_row, text="Sort Z→A", command=lambda: do_sort(False)).pack(side="left")
+
+        ttk.Separator(pop).pack(fill="x", padx=8)
+
+        search_row = ttk.Frame(pop, padding=(8, 6, 8, 2))
+        search_row.pack(fill="x")
+        ttk.Label(search_row, text="Search:").pack(side="left")
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(search_row, textvariable=search_var, bg=t["entry_bg"], fg=t["entry_fg"],
+                                 insertbackground=t["fg"], relief="flat")
+        search_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        list_container = ttk.Frame(pop)
+        list_container.pack(fill="both", expand=True, padx=8, pady=4, side="top")
+        canvas = tk.Canvas(list_container, bg=t["panel"], highlightthickness=0)
+        vscroll = ttk.Scrollbar(list_container, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=vscroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_wheel(_e=None):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_wheel(_e=None):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+        pop.bind("<Destroy>", lambda e: _unbind_wheel())
+
+        check_vars = {}
+
+        def rebuild_list(*_a):
+            for child in inner.winfo_children():
+                child.destroy()
+            check_vars.clear()
+            q = search_var.get().strip().lower()
+            for v in all_values:
+                if q and q not in v.lower():
+                    continue
+                var = tk.BooleanVar(value=checked.get(v, True))
+                check_vars[v] = var
+                cb = tk.Checkbutton(inner, text=v, variable=var, bg=t["panel"], fg=t["fg"],
+                                     selectcolor=t["entry_bg"], anchor="w")
+                cb.pack(fill="x", anchor="w")
+
+        search_var.trace_add("write", rebuild_list)
+        rebuild_list()
+
+        def select_all():
+            for var in check_vars.values():
+                var.set(True)
+
+        def deselect_all():
+            for var in check_vars.values():
+                var.set(False)
+
+        def apply_and_close():
+            for v in all_values:
+                if v in check_vars:
+                    checked[v] = check_vars[v].get()
+            newly_selected = {v for v, on in checked.items() if on}
+            column_filter_state[col] = None if newly_selected == set(all_values) else newly_selected
+            refresh_view()
+            pop.destroy()
+
+        btn_row = ttk.Frame(pop, padding=(8, 4, 8, 8))
+        btn_row.pack(fill="x", side="bottom")
+        ttk.Button(btn_row, text="Apply", command=apply_and_close, style="Accent.TButton").pack(side="right")
+        ttk.Button(btn_row, text="Cancel", command=pop.destroy).pack(side="right", padx=(0, 6))
+
+        sel_row = ttk.Frame(pop, padding=(8, 2, 8, 4))
+        sel_row.pack(fill="x", side="bottom")
+        ttk.Button(sel_row, text="Select All", command=select_all).pack(side="left", padx=(0, 4))
+        ttk.Button(sel_row, text="Deselect All", command=deselect_all).pack(side="left")
+
+    for c in cols:
+        b = tk.Button(tr, text="▾", relief="flat", cursor="hand2", bd=0,
+                      bg=t["panel"], fg=t["fg"], activebackground=t["tree_sel"])
+        b.configure(command=lambda c=c: open_column_filter_popup(c))
+        column_filter_buttons[c] = b
+
+    tr.bind("<Configure>", lambda e: _place_column_filter_buttons())
+    w.after(50, _place_column_filter_buttons)
 
     card = ttk.LabelFrame(w, text="Verification", padding=12)
     card.pack(fill="x", padx=10, pady=(8, 0))
@@ -262,12 +476,21 @@ def open_detail_window(app, o):
     comment = tk.Text(card, height=5, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
     comment.pack(fill="x")
 
-    old = app.comments.get(key(o))
+    pending_eq = ps.get_pending_equipment(o["PLC"], o["Area"], o["Equipment"])
+    old = pending_eq or app.comments.get(key(o))
+    if pending_eq:
+        result.set(pending_eq.get("Status") or result.get())
+        refresh_pills()
     if old:
-        if old.get("cause"):
-            cause.set(old["cause"])
-        tester.insert(0, old.get("tester") or "")
-        comment.insert("1.0", old.get("comment") or "")
+        cause_v = pending_eq.get("Cause") if pending_eq else old.get("cause")
+        tester_v = pending_eq.get("Tester") if pending_eq else old.get("tester")
+        comment_v = pending_eq.get("Comment") if pending_eq else old.get("comment")
+        if cause_v:
+            cause.set(cause_v)
+        tester.insert(0, tester_v or app.last_tester_name or "")
+        comment.insert("1.0", comment_v or "")
+    else:
+        tester.insert(0, app.last_tester_name or "")
     check_tester()
 
     def save():
@@ -280,19 +503,18 @@ def open_detail_window(app, o):
             messagebox.showerror("Tester required", "Please enter a Tester Name before saving.")
             return
         try:
-            save_general_comment(app.eng.get(), o["PLC"], o["Template"], o["Area"], o["Equipment"],
-                                  status_v, cause_v, tester_v, comment_v)
-        except Exception as e:
-            messagebox.showerror("Save failed", str(e))
-            return
-        app.comments[key(o)] = {"status": status_v, "cause": cause_v, "tester": tester_v, "comment": comment_v}
-        app.populate_sidebar()
-        app.render_objects()
-        try:
-            _save_tag_verifications(app, o, mapping, tr, dirty_rows=dirty_rows, tester=tester_v)
+            ps.merge_equipment_update(o["PLC"], o["Template"], o["Area"], o["Equipment"],
+                                       status_v, cause_v, tester_v, comment_v)
+            _save_tag_verifications_pending(o, mapping, tr, dirty_rows=dirty_rows, tester=tester_v)
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return  # keep popup open so nothing is lost
+        app.last_tester_name = tester_v
+        app.comments[key(o)] = {"status": status_v, "cause": cause_v, "tester": tester_v, "comment": comment_v}
+        app.populate_sidebar()
+        app.render_objects()
+        if hasattr(app, "refresh_pending_indicator"):
+            app.refresh_pending_indicator()
         dirty_flag["value"] = False
         w.destroy()
 

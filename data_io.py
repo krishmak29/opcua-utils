@@ -59,6 +59,13 @@ def get_address(r):
     return s(r.get("OPC Address"))
 
 
+def get_plc_address(r):
+    """Return the PLC-side symbolic address (engineering sheet 'Address*'
+    column, falling back to 'Address'). Distinct from get_address(), which
+    returns the OPC UA NodeId used for live reads/writes."""
+    return s(r.get("Address*") or r.get("Address"))
+
+
 ENGINEERING_HEADER_ROW = 10
 ENGINEERING_SHEET = "OPC Tag Templates"
 
@@ -171,8 +178,23 @@ def group(data):
         plc = s(r.get("PLC"))
         area = s(r.get("Area Code*"))
         eq = s(r.get("Equipment Number*"))
-        if not plc or not eq:
+        tag_name = s(r.get("Tag Name"))
+
+        if not plc:
             continue
-        k = (plc, area, eq)
-        out.setdefault(k, {"PLC": plc, "Area": area, "Equipment": eq, "Template": s(r.get("Template")), "Rows": []})["Rows"].append(r)
+        if not eq and not tag_name:
+            continue
+
+        if eq:
+            k = (plc, area, eq)
+            display_eq = eq
+        else:
+            # No Equipment Number: keep each such tag as its own object rather
+            # than merging unrelated blank-equipment tags together under one
+            # (plc, area) group. Tag Name becomes both the grouping key and
+            # the fallback display identity (locked spec 7.4).
+            k = (plc, area, "__NOEQ__", tag_name)
+            display_eq = f"[Tag] {tag_name}"
+
+        out.setdefault(k, {"PLC": plc, "Area": area, "Equipment": display_eq, "Template": s(r.get("Template")), "Rows": []})["Rows"].append(r)
     return list(out.values())
