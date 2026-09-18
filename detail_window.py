@@ -224,10 +224,15 @@ def open_detail_window(app, o):
     tr_frame.grid_columnconfigure(0, weight=1)
     tr = ttk.Treeview(tr_frame, columns=cols, show="headings")
     for c, ttext, wd in [("tag", "Tag Name", 230), ("value", "PLC / OPC Value", 130), ("saved", "Saved Value", 110),
-                          ("address", "PLC Address (click to sort)", 160), ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
-                          ("verify", "Verify Sts (dbl-click)", 130), ("verifyTS", "Verify TS", 80)]:
-        tr.heading(c, text=ttext)
-        tr.column(c, width=wd, stretch=False)
+                          ("address", "PLC Address", 160), ("type", "Data Type", 90), ("access", "Access", 70), ("unit", "Eng Units", 80),
+                          ("verify", "Verify Status", 130), ("verifyTS", "Verify TS", 80)]:
+        # anchor="w": left-align header text so it never runs into the
+        # filter arrow, which is placed over the column's right edge.
+        # Shortened a couple of labels ("PLC Address (click to sort)",
+        # "Verify Sts (dbl-click)") that were long enough to get clipped
+        # by the column width even before the arrow was added.
+        tr.heading(c, text=ttext, anchor="w")
+        tr.column(c, width=wd, stretch=False, anchor="w")
     tr.grid(row=0, column=0, sticky="nsew")
 
     def _on_tr_motion(event):
@@ -286,10 +291,21 @@ def open_detail_window(app, o):
         return x
 
     def _place_column_filter_buttons():
+        style = ttk.Style(tr)
+        header_height = style.lookup("Treeview.Heading", "height") or 25
+        try:
+            header_height = int(header_height)
+        except (TypeError, ValueError):
+            header_height = 25
+        btn_h = max(header_height - 2, 16)
+        btn_w = 14
         for c, btn in column_filter_buttons.items():
             x = _column_x_offset(c)
             width = int(tr.column(c, "width"))
-            btn.place(in_=tr, x=x + width - 20, y=1, width=18, height=20)
+            # Narrow strip flush against the column's right border, not
+            # overlapping the header text (which is now left-anchored),
+            # so it reads as part of the header rather than a chip on top.
+            btn.place(in_=tr, x=x + width - btn_w - 2, y=1, width=btn_w, height=btn_h)
 
     def refresh_view():
         items = list(mapping.items())
@@ -415,10 +431,26 @@ def open_detail_window(app, o):
         ttk.Button(sel_row, text="Select All", command=select_all).pack(side="left", padx=(0, 4))
         ttk.Button(sel_row, text="Deselect All", command=deselect_all).pack(side="left")
 
+    header_bg = ttk.Style(tr).lookup("Treeview.Heading", "background") or t["panel"]
+    if app.theme == "light":
+        # In light mode a button that matches the (near-white) header
+        # background is nearly invisible, so give it real contrast instead.
+        btn_bg, btn_fg, btn_hover = t["muted"], "#FFFFFF", t["accent"]
+    else:
+        # In dark mode the header is already dark, so keep the subtle,
+        # blended-in look.
+        btn_bg, btn_fg, btn_hover = header_bg, t["muted"], t["tree_sel"]
     for c in cols:
-        b = tk.Button(tr, text="▾", relief="flat", cursor="hand2", bd=0,
-                      bg=t["panel"], fg=t["fg"], activebackground=t["tree_sel"])
+        b = tk.Button(tr, text="▾", font=("Segoe UI", 7), relief="flat", cursor="hand2",
+                      bd=0, highlightthickness=0, takefocus=0,
+                      bg=btn_bg, fg=btn_fg,
+                      activebackground=btn_hover, activeforeground="#FFFFFF")
         b.configure(command=lambda c=c: open_column_filter_popup(c))
+        # Hover highlight -- plain tk.Button only shows activebackground on
+        # press, not on mouse-over, so bind Enter/Leave to make it feel
+        # responsive.
+        b.bind("<Enter>", lambda e, b=b: b.configure(bg=btn_hover, fg="#FFFFFF"))
+        b.bind("<Leave>", lambda e, b=b: b.configure(bg=btn_bg, fg=btn_fg))
         column_filter_buttons[c] = b
 
     tr.bind("<Configure>", lambda e: _place_column_filter_buttons())
@@ -473,7 +505,8 @@ def open_detail_window(app, o):
     cb.pack(anchor="w")
 
     ttk.Label(card, text="Comment:").pack(anchor="w", pady=(12, 2))
-    comment = tk.Text(card, height=5, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat")
+    comment = tk.Text(card, height=5, bg=t["entry_bg"], fg=t["entry_fg"], insertbackground=t["fg"], relief="flat",
+                       selectbackground=t["accent"], selectforeground="#FFFFFF")
     comment.pack(fill="x")
 
     pending_eq = ps.get_pending_equipment(o["PLC"], o["Area"], o["Equipment"])

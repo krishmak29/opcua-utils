@@ -161,6 +161,8 @@ class App(tk.Tk):
         style.configure("TCombobox", fieldbackground=t["entry_bg"], foreground=t["entry_fg"], background=t["panel"])
         style.map("TCombobox", fieldbackground=[("readonly", t["entry_bg"])])
         style.configure("TSeparator", background=t["border"])
+        style.configure("TLabelframe", background=t["bg"], bordercolor=t["border"])
+        style.configure("TLabelframe.Label", background=t["bg"], foreground=t["fg"])
         style.configure("Treeview", background=t["tree_bg"], fieldbackground=t["tree_bg"], foreground=t["tree_fg"], bordercolor=t["border"], borderwidth=0)
         style.map("Treeview", background=[("selected", t["tree_sel"])], foreground=[("selected", t["fg"])])
         style.configure("Treeview.Heading", background=t["panel"], foreground=t["fg"], bordercolor=t["border"])
@@ -172,28 +174,63 @@ class App(tk.Tk):
         self.cfg = load_config(self.cf.get())
         self.load()
 
-    def load(self):
-        try:
-            d = self.cfg["display"]
-            self.objects = group(load_engineering(
-                self.eng.get(),
-                status_col_letter=d.get("VerifyStatusColumn"),
-                ts_col_letter=d.get("VerifyTimestampColumn"),
-                cv_col_letter=d.get("CurrentValueColumn"),
-                tester_col_letter=d.get("TesterColumn"),
-            ))
-            self.comments = load_general_comments(self.eng.get())
-            self.byplc = {}
-            for o in self.objects:
-                self.byplc.setdefault(o["PLC"], []).append(o)
-            self.current_plc = None
-            self.populate_sidebar()
-            self.render_objects()
-            self.status.set(f"Loaded {len(self.objects)} objects")
-            self.update_progress()
-            self.refresh_pending_indicator()
-        except Exception as e:
-            messagebox.showerror("Load error", str(e))
+    def load(self, popup=None, on_done=None):
+        """Reads the engineering Excel file in a background thread so the UI
+        never freezes. Pass an existing `popup` (from _show_saving_popup) to
+        reuse/relabel it instead of creating a second one; `on_done` runs
+        after the UI has been refreshed, whether load succeeded or failed."""
+        d = self.cfg["display"]
+        eng_path = self.eng.get()
+        own_popup = popup is None
+        if own_popup:
+            popup = self._show_saving_popup("Loading data...")
+        else:
+            self._set_popup_text(popup, "Reloading data...")
+
+        def work():
+            try:
+                objects = group(load_engineering(
+                    eng_path,
+                    status_col_letter=d.get("VerifyStatusColumn"),
+                    ts_col_letter=d.get("VerifyTimestampColumn"),
+                    cv_col_letter=d.get("CurrentValueColumn"),
+                    tester_col_letter=d.get("TesterColumn"),
+                ))
+                comments = load_general_comments(eng_path)
+            except Exception as e:
+                self.after(0, lambda: self._on_load_error(popup, e, on_done))
+                return
+            self.after(0, lambda: self._on_load_done(popup, objects, comments, on_done))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_popup_text(self, popup, text):
+        for child in popup.winfo_children():
+            for w in child.winfo_children():
+                if isinstance(w, ttk.Label):
+                    w.config(text=text)
+
+    def _on_load_error(self, popup, e, on_done):
+        popup.destroy()
+        messagebox.showerror("Load error", str(e))
+        if on_done:
+            on_done()
+
+    def _on_load_done(self, popup, objects, comments, on_done):
+        popup.destroy()
+        self.objects = objects
+        self.comments = comments
+        self.byplc = {}
+        for o in self.objects:
+            self.byplc.setdefault(o["PLC"], []).append(o)
+        self.current_plc = None
+        self.populate_sidebar()
+        self.render_objects()
+        self.status.set(f"Loaded {len(self.objects)} objects")
+        self.update_progress()
+        self.refresh_pending_indicator()
+        if on_done:
+            on_done()
 
     def refresh_pending_indicator(self):
         data = ps.load_pending()
@@ -205,6 +242,31 @@ class App(tk.Tk):
         else:
             self.pending_label.config(text="")
 
+    def _show_saving_popup(self, text="Saving to Excel..."):
+        w = tk.Toplevel(self)
+        w.title("Please wait")
+        w.transient(self)
+        w.resizable(False, False)
+        w.configure(bg=self.colors()["bg"])
+        w.grab_set()
+        w.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        f = ttk.Frame(w, padding=20)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text=text).pack(pady=(0, 10))
+        bar = ttk.Progressbar(f, mode="indeterminate", length=220)
+        bar.pack()
+        bar.start(12)
+
+        ww, wh = 300, 100
+        self.update_idletasks()
+        px, py = self.winfo_rootx(), self.winfo_rooty()
+        pw, ph = self.winfo_width(), self.winfo_height()
+        x = px + (pw - ww) // 2
+        y = py + (ph - wh) // 2
+        w.geometry(f"{ww}x{wh}+{x}+{y}")
+        return w
+
     def save_to_excel(self):
         data = ps.load_pending()
         tag_updates = list(data.get("tags", {}).values())
@@ -214,22 +276,38 @@ class App(tk.Tk):
             return
 
         d = self.cfg["display"]
-        try:
-            result = save_pending_batch(
-                self.eng.get(), ENGINEERING_SHEET,
-                tag_updates,
-                d.get("VerifyStatusColumn"), d.get("VerifyTimestampColumn"),
-                d.get("CurrentValueColumn"), d.get("TesterColumn"),
-                equipment_updates,
-                header_row=ENGINEERING_HEADER_ROW,
-            )
-        except Exception as e:
-            messagebox.showerror(
-                "Save to Excel failed",
-                f"{e}\n\nPending changes have been kept. You can retry once the issue is resolved."
-            )
-            return
+        self.save_excel_btn.config(state="disabled")
+        popup = self._show_saving_popup()
 
+        def work():
+            try:
+                result = save_pending_batch(
+                    self.eng.get(), ENGINEERING_SHEET,
+                    tag_updates,
+                    d.get("VerifyStatusColumn"), d.get("VerifyTimestampColumn"),
+                    d.get("CurrentValueColumn"), d.get("TesterColumn"),
+                    equipment_updates,
+                    header_row=ENGINEERING_HEADER_ROW,
+                )
+            except Exception as e:
+                self.after(0, lambda: self._on_save_to_excel_error(popup, e))
+                return
+            self.after(0, lambda: self._on_save_to_excel_done(popup, result))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_save_to_excel_error(self, popup, e):
+        popup.destroy()
+        self.save_excel_btn.config(state="normal")
+        messagebox.showerror(
+            "Save to Excel failed",
+            f"{e}\n\nPending changes have been kept. You can retry once the issue is resolved."
+        )
+
+    def _on_save_to_excel_done(self, popup, result):
+        # Don't destroy the popup here -- load() below reuses it (relabeled)
+        # for the reload, so there's no gap where the UI looks interactive
+        # again while the reload is still doing blocking Excel I/O.
         ps.clear_pending()
         msg = f"{result['tags_written']} tag update(s) and {result['equipment_written']} equipment update(s) saved to Excel."
         if result["tags_mismatched"]:
@@ -239,8 +317,11 @@ class App(tk.Tk):
                     + (" ..." if len(result["tags_mismatched"]) > 10 else ""))
         if result["tags_no_row"]:
             msg += f"\n\n{len(result['tags_no_row'])} tag(s) had no source row reference and were skipped."
+        self.load(popup=popup, on_done=lambda: self._finish_save_to_excel(msg))
+
+    def _finish_save_to_excel(self, msg):
+        self.save_excel_btn.config(state="normal")
         messagebox.showinfo("Save to Excel", msg)
-        self.load()
 
     def open_settings(self):
         w = tk.Toplevel(self)
